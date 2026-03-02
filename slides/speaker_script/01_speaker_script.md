@@ -1,0 +1,2 @@
+### Slide 1
+Good morning, everyone. Today, we're going to explore the "Traveller" project. This is a Spring Boot application designed as a clear and concise demonstration. Its primary purpose is to manage travel-related information, providing a straightforward set of functionalities for handling travel entities. We see it as a foundational project, showcasing how to build a simple yet effective web service, leveraging the power of the Spring Boot framework and utilizing an H2 in-memory database for its data persistence needs.
