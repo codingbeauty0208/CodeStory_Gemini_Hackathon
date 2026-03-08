@@ -58,19 +58,38 @@ export async function POST(request: Request) {
     model,
   )}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
-  try {
-    const response = await fetch(url, {
+  const requestBody = {
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: prompt }],
+      },
+    ],
+  };
+
+  async function doRequest(): Promise<Response> {
+    return fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: prompt }],
-          },
-        ],
-      }),
+      body: JSON.stringify(requestBody),
     });
+  }
+
+  try {
+    let response = await doRequest();
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      const parsedError = parseGeminiErrorPayload(errorText);
+
+      if (parsedError?.status === "RESOURCE_EXHAUSTED") {
+        const retryAfterSeconds = getRetryAfterSeconds(parsedError);
+        const waitMs = retryAfterSeconds != null ? Math.min(retryAfterSeconds * 1000, 30000) : 20000;
+
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        response = await doRequest();
+      }
+    }
 
     if (!response.ok) {
       const errorText = await response.text();

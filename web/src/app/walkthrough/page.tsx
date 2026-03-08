@@ -64,6 +64,7 @@ export default function WalkthroughPage() {
   const geminiPlaybackQueueRef = useRef<Promise<void>>(Promise.resolve());
   const geminiPendingTextRef = useRef("");
   const geminiAudioChunksInTurnRef = useRef(0);
+  const geminiTurnCompleteResolverRef = useRef<(() => void) | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const micCaptureContextRef = useRef<AudioContext | null>(null);
   const micSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -544,6 +545,10 @@ export default function WalkthroughPage() {
           }
           geminiPendingTextRef.current = "";
           geminiAudioChunksInTurnRef.current = 0;
+          if (geminiTurnCompleteResolverRef.current) {
+            geminiTurnCompleteResolverRef.current();
+            geminiTurnCompleteResolverRef.current = null;
+          }
           setLiveState("resuming");
           void sleep(280).then(() => setLiveState("playing"));
         }
@@ -575,7 +580,7 @@ export default function WalkthroughPage() {
   }, [enqueueGeminiAudioChunk, speakTextFallback]);
 
   const submitQuestionWithGeminiLive = useCallback(
-    async (rawQuestion: string) => {
+    async (rawQuestion: string, options?: { withContext?: boolean }) => {
       const trimmedQuestion = rawQuestion.trim();
       if (!trimmedQuestion) {
         return;
@@ -586,11 +591,17 @@ export default function WalkthroughPage() {
       await sleep(300);
       setLiveState("answering");
 
+      // Unlock AudioContext on this user gesture so Gemini audio playback works.
+      await getOrCreateAudioContext().catch(() => {});
+
       try {
         const socket = await getOrCreateGeminiSocket();
         geminiPendingTextRef.current = "";
         geminiAudioChunksInTurnRef.current = 0;
-        const prompt = buildLivePrompt(trimmedQuestion);
+        const prompt = options?.withContext === false ? trimmedQuestion : buildLivePrompt(trimmedQuestion);
+        const turnCompletePromise = new Promise<void>((resolve) => {
+          geminiTurnCompleteResolverRef.current = resolve;
+        });
 
         socket.send(
           JSON.stringify({
@@ -605,7 +616,27 @@ export default function WalkthroughPage() {
             },
           }),
         );
+
+        const timedOut = await Promise.race([
+          turnCompletePromise.then(() => false),
+          sleep(9000).then(() => true),
+        ]);
+        if (timedOut) {
+          geminiTurnCompleteResolverRef.current = null;
+          const pendingText = geminiPendingTextRef.current.trim();
+          if (pendingText) {
+            setLiveAnswer(pendingText);
+            speakTextFallback(pendingText);
+          } else {
+            const fallbackLine = "Live audio response is delayed. Please retry your question.";
+            setLiveAnswer(fallbackLine);
+            speakTextFallback(fallbackLine);
+          }
+          geminiPendingTextRef.current = "";
+          geminiAudioChunksInTurnRef.current = 0;
+        }
       } catch {
+        geminiTurnCompleteResolverRef.current = null;
         closeGeminiLive();
         throw new Error("Gemini live bidirectional request failed.");
       }
@@ -614,7 +645,7 @@ export default function WalkthroughPage() {
       await sleep(400);
       setLiveState("playing");
     },
-    [buildLivePrompt, closeGeminiLive, getOrCreateGeminiSocket],
+    [buildLivePrompt, closeGeminiLive, getOrCreateAudioContext, getOrCreateGeminiSocket],
   );
 
   const submitQuestion = useCallback(
@@ -684,6 +715,9 @@ export default function WalkthroughPage() {
     setIsListening(false);
     setIsNarratingSlides(true);
     if (liveBidiEnabled) {
+      void getOrCreateAudioContext().catch(() => {
+        // Keep flow alive; text fallback still handles output.
+      });
       void speakSlideWithGeminiLive(activeSlideIndex);
       return;
     }
@@ -761,16 +795,18 @@ export default function WalkthroughPage() {
     }
 
     setActiveSlideIndex(slideIndex);
-    const narrationPrompt = `Narrate this walkthrough slide naturally in under 25 seconds. Focus on clarity.\n\n${buildSlideNarration(
+    const narrationPrompt = `Narrate this slide clearly and concisely for a live walkthrough.\n\n${buildSlideNarration(
       slideModule,
     )}`;
 
     try {
-      await submitQuestionWithGeminiLive(narrationPrompt);
+      await submitQuestionWithGeminiLive(narrationPrompt, { withContext: false });
     } catch {
-      setError("Gemini live narration failed. Falling back to browser narration.");
+      setError("Gemini Live narration failed. Falling back to browser narration.");
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
         speakSlide(slideIndex);
+      } else {
+        setIsNarratingSlides(false);
       }
       return;
     }
@@ -786,6 +822,41 @@ export default function WalkthroughPage() {
     }
     await speakSlideWithGeminiLive(nextSlideIndex);
   };
+
+  const onTestSpeaker = useCallback(async () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    setError(null);
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    try {
+      const ctx = await getOrCreateAudioContext();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(440, ctx.currentTime);
+      osc.frequency.setValueAtTime(0, ctx.currentTime + 0.2);
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.setValueAtTime(0, ctx.currentTime + 0.2);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.2);
+      await sleep(250);
+      if ("speechSynthesis" in window) {
+        const u = new SpeechSynthesisUtterance("If you can hear this, your speaker is working.");
+        u.lang = "en-US";
+        u.rate = 0.95;
+        window.speechSynthesis.speak(u);
+      }
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Speaker test failed. Check system volume and permissions.",
+      );
+    }
+  }, [getOrCreateAudioContext]);
 
   const onToggleListening = () => {
     if (typeof window === "undefined") {
@@ -822,6 +893,9 @@ export default function WalkthroughPage() {
       setLiveAnswer(null);
       setIsListening(true);
       setLiveState("interrupted");
+
+      // Unlock AudioContext on this user gesture so Gemini playback works when chunks arrive.
+      void getOrCreateAudioContext().catch(() => {});
 
       void (async () => {
         try {
@@ -1133,6 +1207,15 @@ export default function WalkthroughPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M11 5 6 9H3v6h3l5 4V5Z" />
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M19 9v6M16 7v10" />
               </svg>
+            </button>
+
+            <button
+              type="button"
+              onClick={onTestSpeaker}
+              className="rounded-full border border-[#E2E8F0] bg-white px-3 py-2 text-[11px] font-medium text-[#64748B] transition hover:border-[#CBD5E1] hover:text-[#0F172A]"
+              title="Play a short tone and spoken phrase to verify audio"
+            >
+              Test speaker
             </button>
           </div>
 
