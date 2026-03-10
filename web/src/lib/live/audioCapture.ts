@@ -45,8 +45,11 @@ export class AudioCapture {
       onChunk(pcmBytes);
     };
 
+    const gain = context.createGain();
+    gain.gain.value = 0;
     source.connect(processor);
-    processor.connect(context.destination);
+    processor.connect(gain);
+    gain.connect(context.destination);
 
     this.stream = stream;
     this.context = context;

@@ -153,7 +153,16 @@ export class GeminiLiveSession {
 
   private handleMessage(raw: string): void {
     try {
-      const payload = JSON.parse(raw) as GeminiLivePayload;
+      const payload = JSON.parse(raw) as GeminiLivePayload & {
+        error?: { message?: string };
+        error_message?: string;
+      };
+      const errMsg = payload.error?.message ?? payload.error_message;
+      if (errMsg) {
+        this.emit("error", errMsg);
+        return;
+      }
+
       const serverContent =
         (payload.serverContent as GeminiLivePayload["serverContent"]) ??
         (payload.server_content as GeminiLivePayload["server_content"]);
@@ -224,10 +233,7 @@ export class GeminiLiveSession {
       JSON.stringify({
         realtimeInput: {
           mediaChunks: [
-            {
-              mimeType: "audio/pcm;rate=16000",
-              data: base64,
-            },
+            { mimeType: "audio/pcm;rate=16000", data: base64 },
           ],
         },
       }),

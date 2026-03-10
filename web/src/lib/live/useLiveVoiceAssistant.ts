@@ -117,10 +117,10 @@ export function useLiveVoiceAssistant(config: { apiKey: string; liveModel: strin
     let silenceFrames = 0;
     let hasHadSpeech = false;
     let hasSentEndForUtterance = false;
-    const SILENCE_THRESHOLD_FRAMES = 25;
-    const SPEECH_ENERGY_THRESHOLD = 300;
+    const SILENCE_THRESHOLD_FRAMES = 38;
+    const SPEECH_ENERGY_THRESHOLD = 150;
 
-    await capture.start(async (pcm16) => {
+    await capture.start((pcm16) => {
       const rms = computeRms(pcm16);
       const isSpeech = rms > SPEECH_ENERGY_THRESHOLD;
 
@@ -139,7 +139,7 @@ export function useLiveVoiceAssistant(config: { apiKey: string; liveModel: strin
         }
       }
 
-      await session.sendAudioChunk(pcm16);
+      void session.sendAudioChunk(pcm16);
     });
 
     setIsListening(true);

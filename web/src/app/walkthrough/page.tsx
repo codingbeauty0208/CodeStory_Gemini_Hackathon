@@ -83,7 +83,7 @@ export default function WalkthroughPage() {
     isReady: liveSessionReady,
   } = useLiveVoiceAssistant({
     apiKey: liveApiKey ?? "",
-    liveModel: liveModelId ?? "gemini-live-2.5-flash-native-audio",
+    liveModel: liveModelId ?? "gemini-2.5-flash-native-audio-preview-12-2025",
   });
 
   useEffect(() => {
@@ -1182,7 +1182,15 @@ export default function WalkthroughPage() {
                   ? "bg-[#EF4444] text-white border-[#EF4444]"
                   : "bg-white text-[#64748B] border-[#E2E8F0] hover:text-[#0F172A] hover:border-[#CBD5E1]"
               }`}
-              title={isListening ? "Stop Microphone" : "Start Microphone"}
+              title={
+                liveBidiEnabled
+                  ? isListening
+                    ? "Click again after speaking to get response"
+                    : "Start voice (speak, then click again)"
+                  : isListening
+                    ? "Stop Microphone"
+                    : "Start Microphone"
+              }
             >
               <svg className={`w-5 h-5 ${isListening ? "animate-pulse" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
