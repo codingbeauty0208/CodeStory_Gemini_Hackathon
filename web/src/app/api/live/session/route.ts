@@ -3,8 +3,10 @@ import { NextResponse } from "next/server";
 export async function POST() {
   const apiKeyConfigured = Boolean(process.env.GEMINI_API_KEY);
   const model = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
-  const liveModel = process.env.GEMINI_LIVE_MODEL ?? "gemini-2.0-flash-live-001";
-  const exposeClientKey = process.env.NODE_ENV !== "production";
+  const liveModel =
+    process.env.GEMINI_LIVE_MODEL ?? "gemini-live-2.5-flash-native-audio";
+  const exposeClientKey =
+    process.env.GEMINI_LIVE_EXPOSE_CLIENT_KEY === "true" || process.env.NODE_ENV !== "production";
 
   return NextResponse.json({
     ok: true,

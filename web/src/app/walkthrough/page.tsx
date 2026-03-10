@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DocsPreview } from "@/components/docs-preview";
 import { SlideCanvas } from "@/components/slide-canvas";
+import { useLiveVoiceAssistant } from "@/lib/live/useLiveVoiceAssistant";
 import type { WalkthroughContentResponse, WalkthroughStatusResponse } from "@/lib/walkthrough/types";
 
 type ViewMode = "slides" | "docs";
@@ -69,6 +70,43 @@ export default function WalkthroughPage() {
   const micCaptureContextRef = useRef<AudioContext | null>(null);
   const micSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const micProcessorRef = useRef<ScriptProcessorNode | null>(null);
+
+  const [liveApiKey, setLiveApiKey] = useState<string | null>(null);
+  const [liveModelId, setLiveModelId] = useState<string | null>(null);
+
+  const {
+    startListening: startGeminiListening,
+    stopListening: stopGeminiListening,
+    assistantState,
+    lastText: liveTranscript,
+    error: liveError,
+    isReady: liveSessionReady,
+  } = useLiveVoiceAssistant({
+    apiKey: liveApiKey ?? "",
+    liveModel: liveModelId ?? "gemini-live-2.5-flash-native-audio",
+  });
+
+  useEffect(() => {
+    if (liveError) {
+      setError(liveError);
+    }
+  }, [liveError]);
+
+  useEffect(() => {
+    if (liveTranscript) {
+      setLiveAnswer(liveTranscript);
+    }
+  }, [liveTranscript]);
+
+  useEffect(() => {
+    if (assistantState === "connecting") {
+      setLiveState("interrupted");
+    } else if (assistantState === "answering") {
+      setLiveState("answering");
+    } else if (assistantState === "idle") {
+      setLiveState("playing");
+    }
+  }, [assistantState]);
 
   const pollStatus = useCallback(async () => {
     const query = jobId ? `?jobId=${encodeURIComponent(jobId)}` : "";
@@ -166,9 +204,13 @@ export default function WalkthroughPage() {
           if (data.bidi?.enabled && liveKey && liveModel) {
             geminiLiveConfigRef.current = { apiKey: liveKey, model: liveModel };
             setLiveBidiEnabled(true);
+            setLiveApiKey(liveKey);
+            setLiveModelId(liveModel);
           } else {
             geminiLiveConfigRef.current = null;
             setLiveBidiEnabled(false);
+            setLiveApiKey(null);
+            setLiveModelId(null);
           }
         }
       } catch {
@@ -394,64 +436,6 @@ export default function WalkthroughPage() {
     return geminiAudioContextRef.current;
   }, []);
 
-  const startMicrophoneStreaming = useCallback(
-    async (socket: WebSocket) => {
-      if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-        throw new Error("Microphone streaming is not supported in this browser.");
-      }
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-
-      const captureContext = new AudioContext({ sampleRate: 16000 });
-      if (captureContext.state === "suspended") {
-        await captureContext.resume();
-      }
-
-      const sourceNode = captureContext.createMediaStreamSource(stream);
-      const processorNode = captureContext.createScriptProcessor(4096, 1, 1);
-
-      processorNode.onaudioprocess = (event) => {
-        if (socket.readyState !== WebSocket.OPEN) {
-          return;
-        }
-
-        const input = event.inputBuffer.getChannelData(0);
-        const pcmBytes = float32ToPcm16Bytes(input);
-        const chunk = bytesToBase64(pcmBytes);
-
-        socket.send(
-          JSON.stringify({
-            realtimeInput: {
-              mediaChunks: [
-                {
-                  mimeType: "audio/pcm;rate=16000",
-                  data: chunk,
-                },
-              ],
-            },
-          }),
-        );
-      };
-
-      sourceNode.connect(processorNode);
-      processorNode.connect(captureContext.destination);
-
-      micStreamRef.current = stream;
-      micCaptureContextRef.current = captureContext;
-      micSourceNodeRef.current = sourceNode;
-      micProcessorRef.current = processorNode;
-    },
-    [],
-  );
-
   const enqueueGeminiAudioChunk = useCallback(
     (base64Audio: string, mimeType: string) => {
       geminiPlaybackQueueRef.current = geminiPlaybackQueueRef.current
@@ -556,6 +540,14 @@ export default function WalkthroughPage() {
         // Ignore malformed messages; live stream can continue.
       }
     };
+
+    socket.onerror = () => {
+      setLiveState("playing");
+      setError("Gemini Live connection error. Falling back to text chat.");
+      if (geminiSocketRef.current === socket) {
+        geminiSocketRef.current = null;
+      }
+    };
     socket.onclose = () => {
       if (geminiSocketRef.current === socket) {
         geminiSocketRef.current = null;
@@ -583,6 +575,10 @@ export default function WalkthroughPage() {
     async (rawQuestion: string, options?: { withContext?: boolean }) => {
       const trimmedQuestion = rawQuestion.trim();
       if (!trimmedQuestion) {
+        return;
+      }
+
+      if (geminiTurnCompleteResolverRef.current) {
         return;
       }
 
@@ -692,7 +688,7 @@ export default function WalkthroughPage() {
     [activeDocForModule, activeModule],
   );
 
-  const onToggleSlideNarration = () => {
+  const onToggleSlideNarration = async () => {
     setViewMode("slides");
     if (narrationRef.current) {
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
@@ -714,18 +710,27 @@ export default function WalkthroughPage() {
     stopMicrophoneStreaming();
     setIsListening(false);
     setIsNarratingSlides(true);
-    if (liveBidiEnabled) {
-      void getOrCreateAudioContext().catch(() => {
-        // Keep flow alive; text fallback still handles output.
-      });
-      void speakSlideWithGeminiLive(activeSlideIndex);
-      return;
-    }
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
       setError("Speech synthesis is not supported in this browser.");
       setIsNarratingSlides(false);
       return;
     }
+
+    const synth = window.speechSynthesis;
+    if (synth.getVoices().length === 0) {
+      await new Promise<void>((resolve) => {
+        const onReady = () => {
+          synth.removeEventListener("voiceschanged", onReady);
+          resolve();
+        };
+        synth.addEventListener("voiceschanged", onReady);
+        setTimeout(() => {
+          synth.removeEventListener("voiceschanged", onReady);
+          resolve();
+        }, 3000);
+      });
+    }
+
     speakSlide(activeSlideIndex);
   };
 
@@ -771,10 +776,25 @@ export default function WalkthroughPage() {
       speakSlide(nextSlideIndex);
     };
 
-    utterance.onerror = () => {
+    utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
+      const err = event?.error ?? "";
+      if (err === "interrupted" || err === "canceled") {
+        return;
+      }
       setIsNarratingSlides(false);
-      setError("Unable to narrate slides. Please check browser audio permissions.");
+      setError(
+        `Speech synthesis failed (${err || "unknown"}). Try using a different browser or voice.`,
+      );
     };
+
+    const voices = synth.getVoices();
+    const enVoice =
+      voices.find((v) => v.lang.startsWith("en") && v.localService) ??
+      voices.find((v) => v.lang.startsWith("en")) ??
+      voices[0];
+    if (enVoice) {
+      utterance.voice = enVoice;
+    }
 
     synth.speak(utterance);
   };
@@ -865,22 +885,21 @@ export default function WalkthroughPage() {
 
     if (isListening) {
       recognitionRef.current?.stop();
-      stopMicrophoneStreaming();
-      if (geminiSocketRef.current?.readyState === WebSocket.OPEN) {
-        geminiSocketRef.current.send(
-          JSON.stringify({
-            realtimeInput: {
-              audioStreamEnd: true,
-            },
-          }),
-        );
-      }
+      void stopGeminiListening().catch(() => {});
       setIsListening(false);
       setLiveState((current) => (current === "interrupted" ? "playing" : current));
       return;
     }
 
     if (liveBidiEnabled) {
+      if (!liveSessionReady) {
+        setError(
+          assistantState === "connecting"
+            ? "Connecting to Gemini Live. Please wait..."
+            : "Gemini Live session is not ready. Please refresh and try again.",
+        );
+        return;
+      }
       if ("speechSynthesis" in window) {
         window.speechSynthesis.cancel();
         setIsNarratingSlides(false);
@@ -894,19 +913,17 @@ export default function WalkthroughPage() {
       setIsListening(true);
       setLiveState("interrupted");
 
-      // Unlock AudioContext on this user gesture so Gemini playback works when chunks arrive.
-      void getOrCreateAudioContext().catch(() => {});
-
-      void (async () => {
-        try {
-          const socket = await getOrCreateGeminiSocket();
-          await startMicrophoneStreaming(socket);
-        } catch {
-          setIsListening(false);
-          setLiveState("playing");
-          setError("Unable to stream microphone to Gemini Live. Falling back to browser speech capture.");
-        }
-      })();
+      void startGeminiListening().catch((err) => {
+        setIsListening(false);
+        setLiveState("playing");
+        const msg =
+          err instanceof Error
+            ? err.message
+            : String(err ?? "Unknown error");
+        setError(
+          msg || "Unable to stream microphone to Gemini Live. Falling back to browser speech capture.",
+        );
+      });
       return;
     }
 
@@ -1345,6 +1362,9 @@ function playAudioBuffer(audioContext: AudioContext, audioBuffer: AudioBuffer): 
 function buildSlideNarration(
   module: NonNullable<WalkthroughContentResponse["deck"]>["modules"][number],
 ): string {
+  if (module.speaker_notes?.trim()) {
+    return module.speaker_notes.trim();
+  }
   const sectionNarration = module.sections
     .map((section) => {
       const title = section.title ? `${section.title}. ` : "";
@@ -1374,6 +1394,5 @@ function buildSlideNarration(
     .filter(Boolean)
     .join(". ");
 
-  const speakerNotes = module.speaker_notes ? `Speaker notes: ${module.speaker_notes}` : "";
-  return [module.title, module.subtitle, sectionNarration, speakerNotes].filter(Boolean).join(". ");
+  return [module.title, module.subtitle, sectionNarration].filter(Boolean).join(". ");
 }

@@ -77,23 +77,27 @@ export async function POST(request: Request) {
 
   try {
     let response = await doRequest();
+    let lastErrorText: string | null = null;
+    let lastParsedError: ReturnType<typeof parseGeminiErrorPayload> = null;
 
     if (!response.ok) {
-      const errorText = await response.text();
-      const parsedError = parseGeminiErrorPayload(errorText);
+      lastErrorText = await response.text();
+      lastParsedError = parseGeminiErrorPayload(lastErrorText);
 
-      if (parsedError?.status === "RESOURCE_EXHAUSTED") {
-        const retryAfterSeconds = getRetryAfterSeconds(parsedError);
-        const waitMs = retryAfterSeconds != null ? Math.min(retryAfterSeconds * 1000, 30000) : 20000;
+      if (lastParsedError?.status === "RESOURCE_EXHAUSTED") {
+        const retryAfterSeconds = getRetryAfterSeconds(lastParsedError);
+        const waitMs = retryAfterSeconds != null ? Math.min(retryAfterSeconds * 1000, 65000) : 25000;
 
         await new Promise((resolve) => setTimeout(resolve, waitMs));
         response = await doRequest();
+        lastErrorText = null;
+        lastParsedError = null;
       }
     }
 
     if (!response.ok) {
-      const errorText = await response.text();
-      const parsedError = parseGeminiErrorPayload(errorText);
+      const errorText = lastErrorText ?? (await response.text());
+      const parsedError = lastParsedError ?? parseGeminiErrorPayload(errorText);
 
       if (parsedError?.status === "RESOURCE_EXHAUSTED") {
         const retryAfterSeconds = getRetryAfterSeconds(parsedError);

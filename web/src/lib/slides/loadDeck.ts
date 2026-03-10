@@ -73,12 +73,64 @@ async function loadDeckFromMarkdownFallback(): Promise<SlideDeck | null> {
       .map((filePath, index) => markdownFileToModule(filePath, index + 1)),
   );
 
+  await applySpeakerScriptsToModules(modules);
+
   return {
     deck_title: "Markdown Slides Deck",
     version: "1.0",
     updated_at: new Date().toISOString(),
     modules,
   };
+}
+
+/** Load speaker_script.md from a deck directory and return script text per slide in order. */
+async function loadSpeakerScriptsForDeck(deckDir: string): Promise<string[]> {
+  const scriptPath = path.join(deckDir, "speaker_script.md");
+  try {
+    const raw = await fs.readFile(scriptPath, "utf8");
+    return parseSpeakerScriptMd(raw);
+  } catch {
+    return [];
+  }
+}
+
+/** Parse speaker_script.md content into an array of script strings (one per ### Slide N block). */
+function parseSpeakerScriptMd(raw: string): string[] {
+  const scripts: string[] = [];
+  const blocks = raw.split(/(?=^###\s+Slide\s+\d+)/im);
+  for (const block of blocks) {
+    const trimmed = block.trim();
+    if (!trimmed) continue;
+    const firstLineEnd = trimmed.indexOf("\n");
+    const body = firstLineEnd >= 0 ? trimmed.slice(firstLineEnd + 1).trim() : "";
+    const quoted = body.startsWith('"') && body.endsWith('"')
+      ? body.slice(1, -1).replace(/""/g, '"').trim()
+      : body;
+    if (quoted) scripts.push(quoted);
+  }
+  return scripts;
+}
+
+/** For each source_deck, load speaker_script.md and assign script text to modules by index. */
+async function applySpeakerScriptsToModules(
+  modules: SlideDeck["modules"],
+): Promise<void> {
+  const byDeck = new Map<string, typeof modules>();
+  for (const mod of modules) {
+    const deck = mod.source_deck || "Slides";
+    const list = byDeck.get(deck) ?? [];
+    list.push(mod);
+    byDeck.set(deck, list);
+  }
+  for (const [deckName, list] of byDeck) {
+    const deckDir = path.join(slidesRoot, deckName);
+    const scripts = await loadSpeakerScriptsForDeck(deckDir);
+    list.forEach((mod, i) => {
+      if (scripts[i]) {
+        mod.speaker_notes = scripts[i];
+      }
+    });
+  }
 }
 
 async function markdownFileToModule(filePath: string, position: number): Promise<SlideDeck["modules"][number]> {
